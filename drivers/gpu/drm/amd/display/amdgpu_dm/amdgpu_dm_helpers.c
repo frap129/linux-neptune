@@ -40,34 +40,12 @@
 #include "amdgpu_dm_mst_types.h"
 #include "dpcd_defs.h"
 #include "dc/inc/core_types.h"
-#include "dc_link_dp.h"
 
 #include "dm_helpers.h"
 #include "ddc_service_types.h"
 
-static u32 edid_extract_panel_id(struct edid *edid)
-{
-	return (u32)edid->mfg_id[0] << 24   |
-	       (u32)edid->mfg_id[1] << 16   |
-	       (u32)EDID_PRODUCT_ID(edid);
-}
-
-static void apply_edid_quirks(struct edid *edid, struct dc_edid_caps *edid_caps)
-{
-	uint32_t panel_id = edid_extract_panel_id(edid);
-
-	switch (panel_id) {
-	/* Workaround for some monitors which does not work well with FAMS */
-	case drm_edid_encode_panel_id('S', 'A', 'M', 0x0E5E):
-	case drm_edid_encode_panel_id('S', 'A', 'M', 0x7053):
-	case drm_edid_encode_panel_id('S', 'A', 'M', 0x71AC):
-		DRM_DEBUG_DRIVER("Disabling FAMS on monitor with panel id %X\n", panel_id);
-		edid_caps->panel_patch.disable_fams = true;
-		break;
-	default:
-		return;
-	}
-}
+/* MST Dock */
+static const uint8_t SYNAPTICS_DEVICE_ID[] = "SYNA";
 
 /* dm_helpers_parse_edid_caps
  *
@@ -139,8 +117,6 @@ enum dc_edid_status dm_helpers_parse_edid_caps(
 		edid_caps->speaker_flags = sadb[0];
 	else
 		edid_caps->speaker_flags = DEFAULT_SPEAKER_LOCATION;
-
-	apply_edid_quirks(edid_buf, edid_caps);
 
 	kfree(sads);
 	kfree(sadb);
@@ -258,14 +234,14 @@ bool dm_helpers_dp_mst_write_payload_allocation_table(
 	 * that blocks before commit guaranteeing that the state
 	 * is not gonna be swapped while still in use in commit tail */
 
-	if (!aconnector || !aconnector->mst_port)
+	if (!aconnector || !aconnector->mst_root)
 		return false;
 
-	mst_mgr = &aconnector->mst_port->mst_mgr;
+	mst_mgr = &aconnector->mst_root->mst_mgr;
 	mst_state = to_drm_dp_mst_topology_state(mst_mgr->base.state);
 
 	/* It's OK for this to fail */
-	new_payload = drm_atomic_get_mst_payload_state(mst_state, aconnector->port);
+	new_payload = drm_atomic_get_mst_payload_state(mst_state, aconnector->mst_output_port);
 
 	if (enable) {
 		target_payload = new_payload;
@@ -319,10 +295,10 @@ enum act_return_status dm_helpers_dp_mst_poll_for_allocation_change_trigger(
 
 	aconnector = (struct amdgpu_dm_connector *)stream->dm_stream_context;
 
-	if (!aconnector || !aconnector->mst_port)
+	if (!aconnector || !aconnector->mst_root)
 		return ACT_FAILED;
 
-	mst_mgr = &aconnector->mst_port->mst_mgr;
+	mst_mgr = &aconnector->mst_root->mst_mgr;
 
 	if (!mst_mgr->mst_state)
 		return ACT_FAILED;
@@ -346,22 +322,27 @@ bool dm_helpers_dp_mst_send_payload_allocation(
 	struct drm_dp_mst_atomic_payload *payload;
 	enum mst_progress_status set_flag = MST_ALLOCATE_NEW_PAYLOAD;
 	enum mst_progress_status clr_flag = MST_CLEAR_ALLOCATED_PAYLOAD;
+	int ret = 0;
 
 	aconnector = (struct amdgpu_dm_connector *)stream->dm_stream_context;
 
-	if (!aconnector || !aconnector->mst_port)
+	if (!aconnector || !aconnector->mst_root)
 		return false;
 
-	mst_mgr = &aconnector->mst_port->mst_mgr;
+	mst_mgr = &aconnector->mst_root->mst_mgr;
 	mst_state = to_drm_dp_mst_topology_state(mst_mgr->base.state);
 
-	payload = drm_atomic_get_mst_payload_state(mst_state, aconnector->port);
+	payload = drm_atomic_get_mst_payload_state(mst_state, aconnector->mst_output_port);
+
 	if (!enable) {
 		set_flag = MST_CLEAR_ALLOCATED_PAYLOAD;
 		clr_flag = MST_ALLOCATE_NEW_PAYLOAD;
 	}
 
-	if (enable && drm_dp_add_payload_part2(mst_mgr, mst_state->base.state, payload)) {
+	if (enable)
+		ret = drm_dp_add_payload_part2(mst_mgr, mst_state->base.state, payload);
+
+	if (ret) {
 		amdgpu_dm_set_mst_status(&aconnector->mst_status,
 			set_flag, false);
 	} else {
@@ -468,6 +449,7 @@ bool dm_helpers_dp_mst_start_top_mgr(
 		bool boot)
 {
 	struct amdgpu_dm_connector *aconnector = link->priv;
+	int ret;
 
 	if (!aconnector) {
 		DRM_ERROR("Failed to find connector for link!");
@@ -483,7 +465,16 @@ bool dm_helpers_dp_mst_start_top_mgr(
 	DRM_INFO("DM_MST: starting TM on aconnector: %p [id: %d]\n",
 			aconnector, aconnector->base.base.id);
 
-	return (drm_dp_mst_topology_mgr_set_mst(&aconnector->mst_mgr, true) == 0);
+	ret = drm_dp_mst_topology_mgr_set_mst(&aconnector->mst_mgr, true);
+	if (ret < 0) {
+		DRM_ERROR("DM_MST: Failed to set the device into MST mode!");
+		return false;
+	}
+
+	DRM_INFO("DM_MST: DP%x, %d-lane link detected\n", aconnector->mst_mgr.dpcd[0],
+		aconnector->mst_mgr.dpcd[2] & DP_MAX_LANE_COUNT_MASK);
+
+	return true;
 }
 
 bool dm_helpers_dp_mst_stop_top_mgr(
@@ -523,8 +514,8 @@ bool dm_helpers_dp_read_dpcd(
 		return false;
 	}
 
-	return drm_dp_dpcd_read(&aconnector->dm_dp_aux.aux, address,
-			data, size) > 0;
+	return drm_dp_dpcd_read(&aconnector->dm_dp_aux.aux, address, data,
+				size) == size;
 }
 
 bool dm_helpers_dp_write_dpcd(
@@ -580,7 +571,6 @@ bool dm_helpers_submit_i2c(
 	return result;
 }
 
-#if defined(CONFIG_DRM_AMD_DC_DCN)
 static bool execute_synaptics_rc_command(struct drm_dp_aux *aux,
 		bool is_write_cmd,
 		unsigned char cmd,
@@ -697,7 +687,6 @@ static void apply_synaptics_fifo_reset_wa(struct drm_dp_aux *aux)
 		return;
 
 	data[0] |= (1 << 1); // set bit 1 to 1
-		return;
 
 	if (!execute_synaptics_rc_command(aux, false, 0x31, 4, 0x221198, data))
 		return;
@@ -748,7 +737,6 @@ static uint8_t write_dsc_enable_synaptics_non_virtual_dpcd_mst(
 
 	return ret;
 }
-#endif
 
 bool dm_helpers_dp_write_dsc_enable(
 		struct dc_context *ctx,
@@ -774,15 +762,13 @@ bool dm_helpers_dp_write_dsc_enable(
 		if (!aconnector->dsc_aux)
 			return false;
 
-#if defined(CONFIG_DRM_AMD_DC_DCN)
 		// apply w/a to synaptics
 		if (needs_dsc_aux_workaround(aconnector->dc_link) &&
 		    (aconnector->mst_downstream_port_present.byte & 0x7) != 0x3)
 			return write_dsc_enable_synaptics_non_virtual_dpcd_mst(
 				aconnector->dsc_aux, stream, enable_dsc);
-#endif
 
-		port = aconnector->port;
+		port = aconnector->mst_output_port;
 
 		if (enable) {
 			if (port->passthrough_aux) {
@@ -818,17 +804,13 @@ bool dm_helpers_dp_write_dsc_enable(
 	}
 
 	if (stream->signal == SIGNAL_TYPE_DISPLAY_PORT || stream->signal == SIGNAL_TYPE_EDP) {
-#if defined(CONFIG_DRM_AMD_DC_DCN)
 		if (stream->sink->link->dpcd_caps.dongle_type == DISPLAY_DONGLE_NONE) {
-#endif
 			ret = dm_helpers_dp_write_dpcd(ctx, stream->link, DP_DSC_ENABLE, &enable_dsc, 1);
 			DC_LOG_DC("Send DSC %s to SST RX\n", enable_dsc ? "enable" : "disable");
-#if defined(CONFIG_DRM_AMD_DC_DCN)
 		} else if (stream->sink->link->dpcd_caps.dongle_type == DISPLAY_DONGLE_DP_HDMI_CONVERTER) {
 			ret = dm_helpers_dp_write_dpcd(ctx, stream->link, DP_DSC_ENABLE, &enable_dsc, 1);
 			DC_LOG_DC("Send DSC %s to DP-HDMI PCON\n", enable_dsc ? "enable" : "disable");
 		}
-#endif
 	}
 
 	return ret;
@@ -903,10 +885,34 @@ enum dc_edid_status dm_helpers_read_local_edid(
 		DRM_ERROR("EDID err: %d, on connector: %s",
 				edid_status,
 				aconnector->base.name);
+	if (link->aux_mode) {
+		union test_request test_request = {0};
+		union test_response test_response = {0};
 
-	/* DP Compliance Test 4.2.2.3 */
-	if (link->aux_mode)
-		drm_dp_send_real_edid_checksum(&aconnector->dm_dp_aux.aux, sink->dc_edid.raw_edid[sink->dc_edid.length-1]);
+		dm_helpers_dp_read_dpcd(ctx,
+					link,
+					DP_TEST_REQUEST,
+					&test_request.raw,
+					sizeof(union test_request));
+
+		if (!test_request.bits.EDID_READ)
+			return edid_status;
+
+		test_response.bits.EDID_CHECKSUM_WRITE = 1;
+
+		dm_helpers_dp_write_dpcd(ctx,
+					link,
+					DP_TEST_EDID_CHECKSUM,
+					&sink->dc_edid.raw_edid[sink->dc_edid.length-1],
+					1);
+
+		dm_helpers_dp_write_dpcd(ctx,
+					link,
+					DP_TEST_RESPONSE,
+					&test_response.raw,
+					sizeof(test_response));
+
+	}
 
 	return edid_status;
 }
@@ -1159,7 +1165,7 @@ bool dm_helpers_dp_handle_test_pattern_request(
 		pipe_ctx->stream->timing.display_color_depth = requestColorDepth;
 		pipe_ctx->stream->timing.pixel_encoding = requestPixelEncoding;
 
-		dp_update_dsc_config(pipe_ctx);
+		dc_link_update_dsc_config(pipe_ctx);
 
 		aconnector->timing_changed = true;
 		/* store current timing */
@@ -1189,4 +1195,47 @@ void dm_set_phyd32clk(struct dc_context *ctx, int freq_khz)
 void dm_helpers_enable_periodic_detection(struct dc_context *ctx, bool enable)
 {
 	/* TODO: add periodic detection implementation */
+}
+
+void dm_helpers_dp_mst_update_branch_bandwidth(
+		struct dc_context *ctx,
+		struct dc_link *link)
+{
+	// TODO
+}
+
+static bool dm_is_freesync_pcon_whitelist(const uint32_t branch_dev_id)
+{
+	bool ret_val = false;
+
+	switch (branch_dev_id) {
+	case DP_BRANCH_DEVICE_ID_0060AD:
+	case DP_BRANCH_DEVICE_ID_00E04C:
+	case DP_BRANCH_DEVICE_ID_90CC24:
+		ret_val = true;
+		break;
+	default:
+		break;
+	}
+
+	return ret_val;
+}
+
+enum adaptive_sync_type dm_get_adaptive_sync_support_type(struct dc_link *link)
+{
+	struct dpcd_caps *dpcd_caps = &link->dpcd_caps;
+	enum adaptive_sync_type as_type = ADAPTIVE_SYNC_TYPE_NONE;
+
+	switch (dpcd_caps->dongle_type) {
+	case DISPLAY_DONGLE_DP_HDMI_CONVERTER:
+		if (dpcd_caps->adaptive_sync_caps.dp_adap_sync_caps.bits.ADAPTIVE_SYNC_SDP_SUPPORT == true &&
+			dpcd_caps->allow_invalid_MSA_timing_param == true &&
+			dm_is_freesync_pcon_whitelist(dpcd_caps->branch_dev_id))
+			as_type = FREESYNC_TYPE_PCON_IN_WHITELIST;
+		break;
+	default:
+		break;
+	}
+
+	return as_type;
 }

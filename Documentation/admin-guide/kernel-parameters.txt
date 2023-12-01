@@ -3816,12 +3816,15 @@
 			shutdown the other cpus.  Instead use the REBOOT_VECTOR
 			irq.
 
-	nomodeset	Disable kernel modesetting. DRM drivers will not perform
-			display-mode changes or accelerated rendering. Only the
-			system framebuffer will be available for use if this was
-			set-up by the firmware or boot loader.
+	nomodeset	Disable kernel modesetting. Most systems' firmware
+			sets up a display mode and provides framebuffer memory
+			for output. With nomodeset, DRM and fbdev drivers will
+			not load if they could possibly displace the pre-
+			initialized output. Only the system framebuffer will
+			be available for use. The respective drivers will not
+			perform display-mode changes or accelerated rendering.
 
-			Useful as fallback, or for testing and debugging.
+			Useful as error fallback, or for testing and debugging.
 
 	nomodule	Disable module load
 
@@ -6365,6 +6368,8 @@
 			in situations with strict latency requirements (where
 			interruptions from clocksource watchdog are not
 			acceptable).
+			[x86] directsync: attempt to sync the tsc via direct
+			writes if MSR_IA32_TSC_ADJUST isn't available
 
 	tsc_early_khz=  [X86] Skip early TSC calibration and use the given
 			value instead. Useful when the early TSC frequency discovery
@@ -7016,3 +7021,10 @@
 			  management firmware translates the requests into actual
 			  hardware states (core frequency, data fabric and memory
 			  clocks etc.)
+			active
+			  Use amd_pstate_epp driver instance as the scaling driver,
+			  driver provides a hint to the hardware if software wants
+			  to bias toward performance (0x0) or energy efficiency (0xff)
+			  to the CPPC firmware. then CPPC power algorithm will
+			  calculate the runtime workload and adjust the realtime cores
+			  frequency.

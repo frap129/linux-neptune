@@ -85,8 +85,6 @@ static int wait_for_reset(struct intel_engine_cs *engine,
 			break;
 	} while (time_before(jiffies, timeout));
 
-	flush_scheduled_work();
-
 	if (rq->fence.error != -EIO) {
 		pr_err("%s: hanging request %llx:%lld not reset\n",
 		       engine->name,
@@ -2770,9 +2768,7 @@ static int create_gang(struct intel_engine_cs *engine,
 	i915_request_get(rq);
 
 	i915_vma_lock(vma);
-	err = i915_request_await_object(rq, vma->obj, false);
-	if (!err)
-		err = i915_vma_move_to_active(vma, rq, 0);
+	err = i915_vma_move_to_active(vma, rq, 0);
 	if (!err)
 		err = rq->engine->emit_bb_start(rq,
 						vma->node.start,
@@ -3186,14 +3182,10 @@ create_gpr_client(struct intel_engine_cs *engine,
 	}
 
 	i915_vma_lock(vma);
-	err = i915_request_await_object(rq, vma->obj, false);
-	if (!err)
-		err = i915_vma_move_to_active(vma, rq, 0);
+	err = i915_vma_move_to_active(vma, rq, 0);
 	i915_vma_unlock(vma);
 
 	i915_vma_lock(batch);
-	if (!err)
-		err = i915_request_await_object(rq, batch->obj, false);
 	if (!err)
 		err = i915_vma_move_to_active(batch, rq, 0);
 	if (!err)
@@ -3527,9 +3519,7 @@ static int smoke_submit(struct preempt_smoke *smoke,
 
 	if (vma) {
 		i915_vma_lock(vma);
-		err = i915_request_await_object(rq, vma->obj, false);
-		if (!err)
-			err = i915_vma_move_to_active(vma, rq, 0);
+		err = i915_vma_move_to_active(vma, rq, 0);
 		if (!err)
 			err = rq->engine->emit_bb_start(rq,
 							vma->node.start,
